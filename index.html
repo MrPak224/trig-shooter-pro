@@ -16,7 +16,15 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'trig-bubble-pro-geo-large';
 
         try {
-            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+            const firebaseConfig = {
+                apiKey: "AIzaSyDIsclVOGl3BoS982XJzCY-NGiOHpRUtkA",
+                authDomain: "mrpaksdashboard.firebaseapp.com",
+                projectId: "mrpaksdashboard",
+                storageBucket: "mrpaksdashboard.firebasestorage.app",
+                messagingSenderId: "419050164277",
+                appId: "1:419050164277:web:a37447e5543adf7255a17c"
+            };
+            
             if (firebaseConfig && firebaseConfig.apiKey) {
                 const app = initializeApp(firebaseConfig);
                 auth = getAuth(app);
