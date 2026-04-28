@@ -197,15 +197,21 @@
         const gameContainer = document.getElementById('game-container');
         gameContainer.addEventListener('mousemove', (e) => { if(gameState==='PLAYING') updateAim(e); });
         gameContainer.addEventListener('mousedown', (e) => { 
-            if(gameState==='PLAYING' && e.target.id !== 'next-btn' && e.target.id !== 'swap-icon') {
+            if(gameState==='PLAYING' && e.target.id !== 'next-btn' && e.target.id !== 'swap-icon' && e.target.id !== 'next-canvas') {
                 updateAim(e); fire(); 
             }
         });
-        gameContainer.addEventListener('touchmove', (e) => { e.preventDefault(); if(gameState==='PLAYING') updateAim(e); }, {passive: false});
+        gameContainer.addEventListener('touchmove', (e) => { 
+            if(gameState === 'PLAYING') {
+                e.preventDefault(); 
+                updateAim(e); 
+            }
+        }, {passive: false});
         gameContainer.addEventListener('touchstart', (e) => { 
+            if(gameState !== 'PLAYING') return; // <--- 關鍵修復：如果唔係打緊機，放行所有原生按鈕點擊事件！
             if(e.target.id === 'next-btn' || e.target.id === 'swap-icon' || e.target.id === 'next-canvas') return;
             e.preventDefault(); 
-            if(gameState==='PLAYING') { updateAim(e); fire(); }
+            updateAim(e); fire(); 
         }, {passive: false});
 
         document.addEventListener('keydown', (e) => {
