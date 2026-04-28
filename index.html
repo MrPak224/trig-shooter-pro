@@ -177,8 +177,15 @@
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
-            let mx = (evt.clientX - rect.left) * scaleX;
-            let my = (evt.clientY - rect.top) * scaleY;
+            
+            // 修正：支援 iOS/Android 觸控事件
+            let clientX = evt.touches && evt.touches.length > 0 ? evt.touches[0].clientX : evt.clientX;
+            let clientY = evt.touches && evt.touches.length > 0 ? evt.touches[0].clientY : evt.clientY;
+            
+            if (clientX === undefined || clientY === undefined) return;
+
+            let mx = (clientX - rect.left) * scaleX;
+            let my = (clientY - rect.top) * scaleY;
             
             let dx = mx - width / 2;
             let dy = my - (height - 40);
@@ -194,11 +201,11 @@
                 updateAim(e); fire(); 
             }
         });
-        gameContainer.addEventListener('touchmove', (e) => { e.preventDefault(); if(gameState==='PLAYING') updateAim(e.touches[0]); }, {passive: false});
+        gameContainer.addEventListener('touchmove', (e) => { e.preventDefault(); if(gameState==='PLAYING') updateAim(e); }, {passive: false});
         gameContainer.addEventListener('touchstart', (e) => { 
             if(e.target.id === 'next-btn' || e.target.id === 'swap-icon' || e.target.id === 'next-canvas') return;
             e.preventDefault(); 
-            if(gameState==='PLAYING') { updateAim(e.touches[0]); fire(); }
+            if(gameState==='PLAYING') { updateAim(e); fire(); }
         }, {passive: false});
 
         document.addEventListener('keydown', (e) => {
