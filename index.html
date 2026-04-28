@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>三角神射手 Pro - 進階挑戰版</title>
+    <script type="module">
+        // --- Firebase 聯網設定 ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { projectId: "demo-project" };
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'trig-bubble-pro-geo-large';
+
+        let currentUser = null;
+
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+            }
+        };
+
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user) loadLeaderboard();
+        });
+
+        // --- 遊戲引擎與常數 ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        let width = canvas.width = 360;
+        let height = canvas.height = 600;
+        
+        const BUBBLE_RADIUS = 35; 
+        const ROW_HEIGHT = BUBBLE_RADIUS * Math.sqrt(3);
+        const COLS = 5;           
+        const ROWS = 20;
+        
+        let gameState = 'START'; 
+        let score = 0;
+        let currentLevel = 1; // 新增難度等級變數
+        let animationId;
+        let lastTime = 0;
+        
+        const TYPES = {
+            'sin': { id: 'sin', color: '#00f2fe', hl: ['O', 'H'] },
+            'cos': { id: 'cos', color: '#43e97b', hl: ['A', 'H'] },
+            'tan': { id: 'tan', color: '#fa709a', hl: ['O', 'A'] }
+        };
+        const TYPE_KEYS = ['sin', 'cos', 'tan'];
+
+        let grid = []; 
+        let gridOffsetY = 0;
+        let dropSpeed = 5; 
+        let bullet = null;
+        let cannon = { angle: -Math.PI / 2 };
+        let currentAmmo = getRandomAmmo();
+        let nextAmmo = getRandomAmmo();
+        let fallingBubbles = [];
+        let particles = [];
+
+        function getRandomAmmo() {
+            return TYPE_KEYS[Math.floor(Math.random() * TYPE_KEYS.length)];
+        }
+        
+        // 根據難度決定旋轉角度
+        function getRandomRotation(level) {
+            if (level >= 3) {
+                return Math.random() * Math.PI * 2; // Level 3: 360度任意旋轉
+            }
+            return Math.floor(Math.random() * 4) * (Math.PI / 2); // Level 1 & 2: 90度倍數
+        }
+
+        // --- 網格與座標系統 ---
+        function initGrid() {
+            grid = Array(ROWS).fill().map(() => Array(COLS).fill(null));
+            for (let r = 0; r < 4; r++) {
+                let colsInRow = (r % 2 === 0) ? COLS : COLS - 1;
+                for (let c = 0; c < colsInRow; c++) {
+                    grid[r][c] = { type: getRandomAmmo(), rot: getRandomRotation(currentLevel) };
+                }
+            }
+        }
+
+        function getPixelPos(row, col) {
+            let offset = (row % 2 !== 0) ? BUBBLE_RADIUS : 0;
+            let x = BUBBLE_RADIUS + col * BUBBLE_RADIUS * 2 + offset;
+            let y = BUBBLE_RADIUS + row * ROW_HEIGHT + gridOffsetY;
+            return { x, y };
+        }
+
+        function getGridPos(x, y) {
+            let minDist = Infinity;
+            let bestRow = -1, bestCol = -1;
+            for (let r = 0; r < ROWS; r++) {
+                let colsInRow = (r % 2 === 0) ? COLS : COLS - 1;
+                for (let c = 0; c < colsInRow; c++) {
+                    if (grid[r][c] === null) {
+                        let p = getPixelPos(r, c);
+                        let dist = Math.hypot(p.x - x, p.y - y);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            bestRow = r; bestCol = c;
+                        }
+                    }
+                }
+            }
+            return { row: bestRow, col: bestCol };
+        }
+
+        function getNeighbors(row, col) {
+            const neighbors = [];
+            const isOdd = row % 2 !== 0;
+            const directions = isOdd ? 
+                [[-1, 0], [-1, 1], [0, -1], [0, 1], [1, 0], [1, 1]] :
+                [[-1, -1], [-1, 0], [0, -1], [0, 1], [1, -1], [1, 0]];
+            
+            for (let d of directions) {
+                let r = row + d[0];
+                let c = col + d[1];
+                let maxCols = (r % 2 === 0) ? COLS : COLS - 1;
+                if (r >= 0 && r < ROWS && c >= 0 && c < maxCols) {
+                    neighbors.push({row: r, col: c});
+                }
+            }
+            return neighbors;
+        }
+
+        // --- 核心遊戲邏輯 ---
+        function swapAmmo() {
+            if (gameState !== 'PLAYING' || bullet) return;
+            let temp = currentAmmo;
+            currentAmmo = nextAmmo;
+            nextAmmo = temp;
+        }
+        window.swapAmmo = swapAmmo;
+
+        function fire() {
+            if (gameState !== 'PLAYING' || bullet) return;
+            
+            bullet = {
+                x: width / 2,
+                y: height - 40,
+                vx: Math.cos(cannon.angle) * 1200,
+                vy: Math.sin(cannon.angle) * 1200,
+                type: currentAmmo
+            };
+            
+            currentAmmo = nextAmmo;
+            nextAmmo = getRandomAmmo();
+        }
+
+        function updateAim(evt) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            let mx = (evt.clientX - rect.left) * scaleX;
+            let my = (evt.clientY - rect.top) * scaleY;
+            
+            let dx = mx - width / 2;
+            let dy = my - (height - 40);
+            cannon.angle = Math.atan2(dy, dx);
+            if (cannon.angle > -0.1) cannon.angle = -0.1;
+            if (cannon.angle < -Math.PI + 0.1) cannon.angle = -Math.PI + 0.1;
+        }
+
+        const gameContainer = document.getElementById('game-container');
+        gameContainer.addEventListener('mousemove', (e) => { if(gameState==='PLAYING') updateAim(e); });
+        gameContainer.addEventListener('mousedown', (e) => { 
+            if(gameState==='PLAYING' && e.target.id !== 'next-btn' && e.target.id !== 'swap-icon') {
+                updateAim(e); fire(); 
+            }
+        });
+        gameContainer.addEventListener('touchmove', (e) => { e.preventDefault(); if(gameState==='PLAYING') updateAim(e.touches[0]); }, {passive: false});
+        gameContainer.addEventListener('touchstart', (e) => { 
+            if(e.target.id === 'next-btn' || e.target.id === 'swap-icon' || e.target.id === 'next-canvas') return;
+            e.preventDefault(); 
+            if(gameState==='PLAYING') { updateAim(e.touches[0]); fire(); }
+        }, {passive: false});
+
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') { e.preventDefault(); swapAmmo(); }
+        });
+
+        function handleCollision() {
+            if (!bullet) return;
+
+            let hit = false;
+            if (bullet.y <= gridOffsetY + BUBBLE_RADIUS) {
+                hit = true;
+            } else {
+                for (let r = 0; r < ROWS; r++) {
+                    let colsInRow = (r % 2 === 0) ? COLS : COLS - 1;
+                    for (let c = 0; c < colsInRow; c++) {
+                        if (grid[r][c]) {
+                            let p = getPixelPos(r, c);
+                            if (Math.hypot(p.x - bullet.x, p.y - bullet.y) < BUBBLE_RADIUS * 1.8) {
+                                hit = true; break;
+                            }
+                        }
+                    }
+                    if (hit) break;
+                }
+            }
+
+            if (hit) {
+                let pos = getGridPos(bullet.x, bullet.y);
+                
+                let hitTargetType = null;
+                let neighbors = getNeighbors(pos.row, pos.col);
+                for(let n of neighbors) {
+                    if(grid[n.row][n.col]) { hitTargetType = grid[n.row][n.col].type; break; }
+                }
+
+                grid[pos.row][pos.col] = { type: bullet.type, rot: getRandomRotation(currentLevel) };
+                let bulletType = bullet.type;
+                bullet = null;
+
+                let cluster = getMatchingCluster(pos.row, pos.col, bulletType);
+                
+                if (cluster.length >= 1 && (hitTargetType ? cluster.length > 1 : cluster.length > 1)) {
+                    let points = cluster.length * 10;
+                    score += points;
+                    
+                    cluster.forEach(cell => {
+                        let p = getPixelPos(cell.row, cell.col);
+                        // 爆炸顏色根據等級調整
+                        let expColor = currentLevel >= 3 ? '#f43f5e' : (currentLevel >= 2 ? '#fbbf24' : TYPES[grid[cell.row][cell.col].type].color);
+                        createExplosion(p.x, p.y, expColor);
+                        grid[cell.row][cell.col] = null;
+                    });
+                    
+                    document.getElementById('live-score').innerText = score;
+                    showToast(`配對正確！ +${points}`, '#10b981');
+                    removeDisconnectedBubbles();
+                } else {
+                    showToast("組合錯誤！", '#ef4444');
+                }
+            }
+        }
+
+        function getMatchingCluster(startRow, startCol, matchType) {
+            let cluster = [];
+            let visited = Array(ROWS).fill().map(() => Array(COLS).fill(false));
+            let stack = [{row: startRow, col: startCol}];
+            
+            while (stack.length > 0) {
+                let curr = stack.pop();
+                if (visited[curr.row][curr.col]) continue;
+                visited[curr.row][curr.col] = true;
+                
+                if (grid[curr.row][curr.col] && grid[curr.row][curr.col].type === matchType) {
+                    cluster.push(curr);
+                    let neighbors = getNeighbors(curr.row, curr.col);
+                    for (let n of neighbors) {
+                        if (!visited[n.row][n.col]) stack.push(n);
+                    }
+                }
+            }
+            return cluster;
+        }
+
+        function removeDisconnectedBubbles() {
+            let visited = Array(ROWS).fill().map(() => Array(COLS).fill(false));
+            let stack = [];
+            
+            for (let c = 0; c < COLS; c++) {
+                if (grid[0][c]) stack.push({row: 0, col: c});
+            }
+            
+            while (stack.length > 0) {
+                let curr = stack.pop();
+                if (visited[curr.row][curr.col]) continue;
+                visited[curr.row][curr.col] = true;
+                
+                let neighbors = getNeighbors(curr.row, curr.col);
+                for (let n of neighbors) {
+                    if (grid[n.row][n.col] && !visited[n.row][n.col]) stack.push(n);
+                }
+            }
+            
+            let dropped = 0;
+            for (let r = 0; r < ROWS; r++) {
+                let colsInRow = (r % 2 === 0) ? COLS : COLS - 1;
+                for (let c = 0; c < colsInRow; c++) {
+                    if (grid[r][c] && !visited[r][c]) {
+                        let p = getPixelPos(r, c);
+                        fallingBubbles.push({
+                            x: p.x, y: p.y,
+                            vx: (Math.random() - 0.5) * 100, vy: 0,
+                            type: grid[r][c].type, rot: grid[r][c].rot
+                        });
+                        grid[r][c] = null;
+                        dropped++;
+                    }
+                }
+            }
+            
+            if (dropped > 0) {
+                let bonus = dropped * 20;
+                score += bonus;
+                document.getElementById('live-score').innerText = score;
+                showToast(`Combo 掉落！ +${bonus}`, '#f59e0b');
+            }
+        }
+
+        function createExplosion(x, y, color) {
+            for (let i = 0; i < 15; i++) {
+                particles.push({
+                    x: x, y: y,
+                    vx: (Math.random() - 0.5) * 300, vy: (Math.random() - 0.5) * 300,
+                    life: 1, color: color
+                });
+            }
+        }
+
+        function update(dt) {
+            if (gameState !== 'PLAYING') return;
+
+            // 難度判斷邏輯
+            let newLevel = 1;
+            if (score >= 2000) newLevel = 3;
+            else if (score >= 800) newLevel = 2;
+
+            if (newLevel > currentLevel) {
+                currentLevel = newLevel;
+                document.getElementById('level-display').innerText = `LEVEL ${currentLevel}`;
+                
+                if (currentLevel === 2) {
+                    showToast("LEVEL 2: 失去顏色提示！", "#fbbf24");
+                } else if (currentLevel === 3) {
+                    showToast("LEVEL 3: 任意旋轉 + 隱藏字母！", "#f43f5e");
+                }
+            }
+
+            // 速度會隨分數及等級雙重加快
+            let currentDropSpeed = dropSpeed + (score / 400) + (currentLevel - 1) * 3;
+            gridOffsetY += currentDropSpeed * dt;
+
+            if (gridOffsetY > ROW_HEIGHT) {
+                gridOffsetY -= ROW_HEIGHT;
+                for (let r = ROWS - 1; r > 0; r--) {
+                    let maxColsCurr = (r % 2 === 0) ? COLS : COLS - 1;
+                    let maxColsPrev = ((r-1) % 2 === 0) ? COLS : COLS - 1;
+                    for (let c = 0; c < maxColsCurr; c++) {
+                        grid[r][c] = (c < maxColsPrev) ? grid[r-1][c] : null;
+                    }
+                }
+                for (let c = 0; c < COLS; c++) {
+                    grid[0][c] = { type: getRandomAmmo(), rot: getRandomRotation(currentLevel) };
+                }
+            }
+
+            if (bullet) {
+                bullet.x += bullet.vx * dt;
+                bullet.y += bullet.vy * dt;
+
+                if (bullet.x - BUBBLE_RADIUS < 0) {
+                    bullet.x = BUBBLE_RADIUS; bullet.vx *= -1;
+                } else if (bullet.x + BUBBLE_RADIUS > width) {
+                    bullet.x = width - BUBBLE_RADIUS; bullet.vx *= -1;
+                }
+
+                handleCollision();
+            }
+
+            for (let i = fallingBubbles.length - 1; i >= 0; i--) {
+                let fb = fallingBubbles[i];
+                fb.vy += 800 * dt; 
+                fb.x += fb.vx * dt; fb.y += fb.vy * dt;
+                fb.rot += 5 * dt; 
+                if (fb.y > height + 50) fallingBubbles.splice(i, 1);
+            }
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt * 3;
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            const dangerY = height - 100;
+            for (let r = ROWS - 1; r >= 0; r--) {
+                let colsInRow = (r % 2 === 0) ? COLS : COLS - 1;
+                for (let c = 0; c < colsInRow; c++) {
+                    if (grid[r][c]) {
+                        if (getPixelPos(r, c).y + BUBBLE_RADIUS > dangerY) {
+                            setGameOver(); return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- 繪製三角形目標 (根據難度改變樣式) ---
+        function drawTargetTriangle(x, y, typeKey, rot) {
+            const def = TYPES[typeKey];
+            
+            // Level 2 以上失去顏色提示
+            let hlColor = def.color;
+            if (currentLevel === 2) hlColor = '#fbbf24'; // 金色
+            else if (currentLevel >= 3) hlColor = '#f43f5e'; // 紅色
+
+            const dimColor = 'rgba(255,255,255,0.15)';
+            const isOHl = def.hl.includes('O');
+            const isAHl = def.hl.includes('A');
+            const isHHl = def.hl.includes('H');
+
+            ctx.beginPath();
+            ctx.arc(x, y, BUBBLE_RADIUS - 2, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(30, 41, 59, 0.4)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(rot);
+
+            const pC = {x: -18, y: 18};
+            const pA = {x: 18, y: 18};
+            const pB = {x: -18, y: -18};
+
+            // 對邊 (O)
+            ctx.beginPath(); ctx.moveTo(pB.x, pB.y); ctx.lineTo(pC.x, pC.y);
+            ctx.lineWidth = isOHl ? 4 : 2;
+            ctx.strokeStyle = isOHl ? hlColor : dimColor;
+            ctx.stroke();
+
+            // 鄰邊 (A)
+            ctx.beginPath(); ctx.moveTo(pC.x, pC.y); ctx.lineTo(pA.x, pA.y);
+            ctx.lineWidth = isAHl ? 4 : 2;
+            ctx.strokeStyle = isAHl ? hlColor : dimColor;
+            ctx.stroke();
+
+            // 斜邊 (H)
+            ctx.beginPath(); ctx.moveTo(pB.x, pB.y); ctx.lineTo(pA.x, pA.y);
+            ctx.lineWidth = isHHl ? 4 : 2;
+            ctx.strokeStyle = isHHl ? hlColor : dimColor;
+            ctx.stroke();
+
+            // 直角符號
+            ctx.beginPath();
+            ctx.moveTo(-18, 8); ctx.lineTo(-8, 8); ctx.lineTo(-8, 18);
+            ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // θ 角弧線
+            ctx.beginPath();
+            ctx.arc(pA.x, pA.y, 12, Math.PI, Math.PI * 1.25, false);
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.restore();
+
+            function drawUprightText(text, localX, localY, isHl, isSpecial = false) {
+                let gx = x + localX * Math.cos(rot) - localY * Math.sin(rot);
+                let gy = y + localX * Math.sin(rot) + localY * Math.cos(rot);
+                
+                ctx.fillStyle = isSpecial ? '#fff' : (isHl ? hlColor : 'rgba(255,255,255,0.4)');
+                ctx.font = isHl ? 'bold 13px Arial' : '11px Arial'; // 字體稍微縮細
+                if(isSpecial) ctx.font = 'bold 14px Arial'; 
+                
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                
+                if (isHl && !isSpecial) {
+                    ctx.shadowColor = hlColor;
+                    ctx.shadowBlur = 5;
+                }
+                ctx.fillText(text, gx, gy);
+                ctx.shadowBlur = 0;
+            }
+
+            // 畫字 (根據難度決定顯示)
+            if (currentLevel < 3) {
+                drawUprightText('O', -26, 0, isOHl);
+                drawUprightText('A', 0, 26, isAHl);
+                // ** H 放出三角形外 (沿住斜邊向外推) **
+                drawUprightText('H', 15, -15, isHHl); 
+            }
+            // θ 角永遠顯示，並放進內角
+            drawUprightText('θ', 6, 14, true, true); 
+        }
+
+        function drawCannonAmmo(x, y, radius, typeKey) {
+            let ammoColor = TYPES[typeKey].color;
+            if (currentLevel === 2) ammoColor = '#fbbf24';
+            else if (currentLevel >= 3) ammoColor = '#f43f5e';
+
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#1e293b';
+            ctx.fill();
+            ctx.strokeStyle = ammoColor;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            ctx.fillStyle = ammoColor;
+            ctx.font = 'bold 18px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = ammoColor;
+            ctx.shadowBlur = 8;
+            ctx.fillText(typeKey.toUpperCase(), x, y);
+            ctx.shadowBlur = 0;
+        }
+
+        function drawNextBubbleUI() {
+            const nextCanvas = document.getElementById('next-canvas');
+            const nctx = nextCanvas.getContext('2d');
+            nctx.clearRect(0, 0, 60, 60);
+            
+            let ammoColor = TYPES[nextAmmo].color;
+            if (currentLevel === 2) ammoColor = '#fbbf24';
+            else if (currentLevel >= 3) ammoColor = '#f43f5e';
+
+            nctx.beginPath();
+            nctx.arc(30, 30, 24, 0, Math.PI * 2);
+            nctx.fillStyle = '#1e293b';
+            nctx.fill();
+            nctx.strokeStyle = ammoColor;
+            nctx.lineWidth = 2;
+            nctx.stroke();
+            
+            nctx.fillStyle = ammoColor;
+            nctx.font = 'bold 14px Arial';
+            nctx.textAlign = 'center';
+            nctx.textBaseline = 'middle';
+            nctx.fillText(nextAmmo.toUpperCase(), 30, 30);
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, width, height);
+
+            const dangerY = height - 100;
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.05)';
+            ctx.fillRect(0, dangerY, width, 100);
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([10, 5]);
+            ctx.beginPath();
+            ctx.moveTo(0, dangerY); ctx.lineTo(width, dangerY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('⚠ DANGER ZONE ⚠', width/2, dangerY - 5);
+
+            if (gameState === 'START') return;
+
+            for (let r = 0; r < ROWS; r++) {
+                let colsInRow = (r % 2 === 0) ? COLS : COLS - 1;
+                for (let c = 0; c < colsInRow; c++) {
+                    if (grid[r][c]) {
+                        let p = getPixelPos(r, c);
+                        drawTargetTriangle(p.x, p.y, grid[r][c].type, grid[r][c].rot);
+                    }
+                }
+            }
+
+            fallingBubbles.forEach(fb => {
+                drawTargetTriangle(fb.x, fb.y, fb.type, fb.rot);
+            });
+
+            if (bullet) {
+                drawCannonAmmo(bullet.x, bullet.y, BUBBLE_RADIUS, bullet.type);
+            }
+
+            if (!bullet) {
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(width / 2, height - 40);
+                ctx.lineTo(width / 2 + Math.cos(cannon.angle) * 300, height - 40 + Math.sin(cannon.angle) * 300);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            ctx.beginPath();
+            ctx.arc(width / 2, height - 40, 45, 0, Math.PI * 2); 
+            ctx.fillStyle = 'rgba(30, 41, 59, 0.8)';
+            ctx.fill();
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            if (!bullet) {
+                drawCannonAmmo(width / 2, height - 40, BUBBLE_RADIUS, currentAmmo);
+            }
+
+            particles.forEach(p => {
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+            });
+            ctx.globalAlpha = 1.0;
+
+            drawNextBubbleUI();
+        }
+
+        function gameLoop(timestamp) {
+            let dt = (timestamp - lastTime) / 1000;
+            if (dt > 0.1) dt = 0.1; 
+            lastTime = timestamp;
+
+            update(dt);
+            draw();
+
+            if (gameState !== 'GAMEOVER') {
+                animationId = requestAnimationFrame(gameLoop);
+            }
+        }
+
+        // --- UI 控制 ---
+        window.startGame = () => {
+            currentLevel = 1; // 重置等級
+            document.getElementById('level-display').innerText = 'LEVEL 1';
+            
+            initGrid();
+            gridOffsetY = 0; score = 0; dropSpeed = 3; bullet = null;
+            fallingBubbles = []; particles = [];
+            currentAmmo = getRandomAmmo(); nextAmmo = getRandomAmmo();
+            document.getElementById('live-score').innerText = score;
+            
+            document.getElementById('start-overlay').style.display = 'none';
+            document.getElementById('gameover-overlay').style.display = 'none';
+            
+            gameState = 'PLAYING'; lastTime = performance.now();
+            cancelAnimationFrame(animationId);
+            animationId = requestAnimationFrame(gameLoop);
+        };
+
+        function setGameOver() {
+            gameState = 'GAMEOVER';
+            document.getElementById('gameover-overlay').style.display = 'flex';
+            document.getElementById('final-score').innerText = score;
+        }
+
+        let toastTimeout;
+        function showToast(msg, color) {
+            const toast = document.getElementById('toast-msg');
+            toast.innerText = msg; toast.style.background = color || '#3b82f6';
+            toast.style.transform = 'translate(-50%, 0)'; toast.style.opacity = '1';
+            clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                toast.style.transform = 'translate(-50%, -20px)'; toast.style.opacity = '0';
+            }, 2000);
+        }
+
+        // --- 聯網英雄榜 ---
+        window.submitScore = async () => {
+            if (!currentUser) return alert("連線中，請稍等...");
+            const nameInput = document.getElementById('player-name');
+            const playerName = nameInput.value.trim();
+            if (!playerName) return alert("請輸入大名！");
+
+            const btn = document.getElementById('submit-btn');
+            btn.disabled = true; btn.innerText = "上傳中...";
+
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard'), {
+                    name: playerName, score: score, timestamp: new Date().getTime(), userId: currentUser.uid
+                });
+                nameInput.value = ""; btn.innerText = "已上傳";
+                setTimeout(() => { window.startGame(); btn.disabled = false; btn.innerText="上傳分數"; }, 1000);
+            } catch (e) {
+                console.error(e); alert("上傳失敗");
+                btn.disabled = false; btn.innerText = "上傳分數";
+            }
+        };
+
+        function loadLeaderboard() {
+            if (!currentUser) return;
+            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard'), (snapshot) => {
+                let scores = []; snapshot.forEach(doc => scores.push(doc.data()));
+                scores.sort((a, b) => b.score - a.score || a.timestamp - b.timestamp);
+                scores = scores.slice(0, 5);
+                
+                const list = document.getElementById('leaderboard-list'); list.innerHTML = '';
+                if(scores.length === 0) return list.innerHTML = '<div class="lb-row" style="justify-content:center;">暫無紀錄</div>';
+                
+                scores.forEach((entry, idx) => {
+                    const isMe = entry.userId === currentUser.uid;
+                    list.innerHTML += `
+                        <div class="lb-row ${isMe ? 'highlight' : ''}">
+                            <span><span style="color:#94a3b8;width:20px;display:inline-block;">${idx+1}</span> ${escapeHTML(entry.name)}</span>
+                            <span>${entry.score}</span>
+                        </div>`;
+                });
+            });
+        }
+        function escapeHTML(str) { return str.replace(/[&<>'"]/g, tag => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[tag]||tag)); }
+
+        window.onload = () => {
+            draw();
+            ctx.fillStyle = '#fff'; ctx.font = '24px Arial'; ctx.textAlign = 'center';
+            ctx.fillText("載入中...", width/2, height/2);
+        };
+    </script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0b0e14; color: white; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; touch-action: none; }
+        #game-wrapper { position: relative; width: 100%; max-width: 360px; background: #111827; box-shadow: 0 10px 30px rgba(0,0,0,0.8); border-radius: 12px; overflow: hidden; }
+        
+        #top-bar { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: #1f2937; border-bottom: 2px solid #374151; }
+        .title-box { display: flex; flex-direction: column;}
+        .lv-text { color: #f43f5e; font-size: 14px; font-weight: bold; letter-spacing: 1px;}
+        .title-text { font-size: 16px; font-weight: bold; color: #f8fafc;}
+        .score-box { text-align: right;}
+        .score-label { color: #94a3b8; font-size: 10px; font-weight: bold; letter-spacing: 1px;}
+        .score-value { color: #fbbf24; font-size: 22px; font-weight: bold;}
+        
+        #game-container { position: relative; width: 360px; height: 600px; background: linear-gradient(180deg, #0b0e14 0%, #111827 100%); background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 40px 40px; }
+        canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+        
+        #bottom-ui { position: absolute; bottom: 10px; left: 20px; display: flex; align-items: center; gap: 15px; pointer-events: none; }
+        .next-container { display: flex; flex-direction: column; align-items: center; pointer-events: auto; cursor: pointer; transition: transform 0.2s; }
+        .next-container:active { transform: scale(0.9); }
+        .next-label { color: #94a3b8; font-size: 10px; font-weight: bold; margin-bottom: 5px; letter-spacing: 1px;}
+        .next-circle { width: 60px; height: 60px; border-radius: 50%; background: rgba(30, 41, 59, 0.8); border: 2px solid #475569; display: flex; justify-content: center; align-items: center; position: relative; }
+        #swap-icon { position: absolute; top: -5px; right: -10px; background: #3b82f6; color: white; border-radius: 50%; width: 24px; height: 24px; font-size: 12px; display: flex; justify-content: center; align-items: center; border: 2px solid #111827; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
+
+        #toast-msg { position: absolute; top: 20px; left: 50%; transform: translate(-50%, -20px); background: #3b82f6; color: white; padding: 10px 20px; border-radius: 20px; font-weight: bold; font-size: 14px; opacity: 0; transition: all 0.3s ease; pointer-events: none; z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5); white-space: nowrap; }
+
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 14, 20, 0.95); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; backdrop-filter: blur(5px); z-index: 20; }
+        #gameover-overlay { display: none; }
+        
+        h2 { margin: 0 0 10px 0; font-size: 26px; color: #f8fafc;}
+        .subtitle { color: #94a3b8; font-size: 14px; margin-bottom: 25px; line-height: 1.5;}
+        
+        .btn { background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%); color: white; border: none; padding: 12px 30px; font-size: 18px; font-weight: bold; border-radius: 30px; cursor: pointer; margin: 8px; box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4); transition: transform 0.1s; }
+        .btn:active { transform: scale(0.95); }
+        .btn-green { background: linear-gradient(135deg, #10b981 0%, #059669 100%); box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);}
+        
+        input { padding: 12px; border-radius: 8px; border: 2px solid #374151; background: #1f2937; color: white; font-size: 16px; text-align: center; margin-bottom: 15px; width: 70%; outline: none; }
+        input:focus { border-color: #3b82f6; }
+        
+        #leaderboard { margin-top: 15px; width: 100%; max-width: 360px; background: #111827; border-radius: 12px; padding: 15px; box-sizing: border-box; border: 1px solid #1f2937; }
+        #leaderboard h3 { margin: 0 0 15px 0; color: #8b5cf6; text-align: center; font-size: 16px;}
+        .lb-row { display: flex; justify-content: space-between; padding: 10px 10px; border-bottom: 1px solid #1f2937; font-size: 14px;}
+        .lb-row:last-child { border-bottom: none; }
+        .highlight { color: #38bdf8; font-weight: bold; background: rgba(56, 189, 248, 0.1); border-radius: 6px;}
+
+        .tutorial-box { text-align: left; background: #1e293b; padding: 15px 20px; border-radius: 12px; margin-bottom: 30px; border: 1px solid #334155; }
+        .tut-row { display: flex; align-items: center; gap: 15px; margin-bottom: 10px; }
+        .tut-row:last-child { margin-bottom: 0; }
+        .tut-badge { background: #0f172a; padding: 4px 12px; border-radius: 20px; font-weight: bold; width: 40px; text-align: center; border: 1px solid #334155; }
+        .tut-desc { font-size: 14px; color: #cbd5e1; }
+        .tut-hl { font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="game-wrapper">
+        <div id="top-bar">
+            <div class="title-box">
+                <span class="lv-text" id="level-display">LEVEL 1</span>
+                <span class="title-text">三角神射手</span>
+            </div>
+            <div class="score-box">
+                <div class="score-label">SCORE</div>
+                <div class="score-value" id="live-score">0</div>
+            </div>
+        </div>
+        
+        <div id="game-container">
+            <div id="toast-msg"></div>
+            <canvas id="gameCanvas"></canvas>
+            
+            <div id="bottom-ui">
+                <div class="next-container" id="next-btn" onclick="swapAmmo()">
+                    <div class="next-label">NEXT / SWAP</div>
+                    <div class="next-circle">
+                        <canvas id="next-canvas" width="60" height="60"></canvas>
+                        <div id="swap-icon">🔄</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="start-overlay" class="overlay">
+                <h2>消除幾何圖形！</h2>
+                <div class="subtitle">觀察三角形的 <b>θ 角</b> 和 <b>發光的邊</b><br>發射對應的函數公式來配對！<br><span style="color:#fbbf24;font-size:12px;">(提示：小心高分後顏色提示會消失喔)</span></div>
+                
+                <div class="tutorial-box">
+                    <div class="tut-row">
+                        <div class="tut-badge" style="color:#00f2fe;">sin</div>
+                        <div class="tut-desc">高亮 <span class="tut-hl" style="color:#00f2fe;">對邊 (O)</span> 與 <span class="tut-hl" style="color:#00f2fe;">斜邊 (H)</span></div>
+                    </div>
+                    <div class="tut-row">
+                        <div class="tut-badge" style="color:#43e97b;">cos</div>
+                        <div class="tut-desc">高亮 <span class="tut-hl" style="color:#43e97b;">鄰邊 (A)</span> 與 <span class="tut-hl" style="color:#43e97b;">斜邊 (H)</span></div>
+                    </div>
+                    <div class="tut-row">
+                        <div class="tut-badge" style="color:#fa709a;">tan</div>
+                        <div class="tut-desc">高亮 <span class="tut-hl" style="color:#fa709a;">對邊 (O)</span> 與 <span class="tut-hl" style="color:#fa709a;">鄰邊 (A)</span></div>
+                    </div>
+                </div>
+                
+                <button class="btn" onclick="startGame()">▶ 開始挑戰</button>
+            </div>
+            
+            <div id="gameover-overlay" class="overlay">
+                <h2 style="color: #ef4444;">DANGER ZONE!</h2>
+                <div class="subtitle">圖形壓到底線了！</div>
+                <div style="font-size: 16px; color: #94a3b8; margin-bottom: 5px;">最終得分</div>
+                <div style="font-size: 40px; font-weight: bold; color: #fbbf24; margin-bottom: 25px;" id="final-score">0</div>
+                
+                <input type="text" id="player-name" placeholder="輸入名字上傳神仙榜" maxlength="10">
+                <div style="display: flex; flex-direction: column; width: 70%;">
+                    <button class="btn btn-green" id="submit-btn" onclick="submitScore()">上傳成績</button>
+                    <button class="btn" style="background: #475569; box-shadow: 0 4px 15px rgba(0,0,0,0.3);" onclick="startGame()">再玩一次</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="leaderboard">
+        <h3>🏆 伺服器神仙榜 (Top 5)</h3>
+        <div id="leaderboard-list">
+            <div class="lb-row" style="color: #64748b; justify-content:center;">讀取資料中...</div>
+        </div>
+    </div>
+
+</body>
+</html>
