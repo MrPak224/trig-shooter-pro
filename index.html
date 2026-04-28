@@ -10,32 +10,50 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { projectId: "demo-project" };
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
+        let db = null;
+        let auth = null;
+        let currentUser = null;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'trig-bubble-pro-geo-large';
 
-        let currentUser = null;
+        try {
+            const firebaseConfig = {
+                apiKey: "AIzaSyDIsclVOGl3BoS982XJzCY-NGiOHpRUtkA",
+                authDomain: "mrpaksdashboard.firebaseapp.com",
+                projectId: "mrpaksdashboard",
+                storageBucket: "mrpaksdashboard.firebasestorage.app",
+                messagingSenderId: "419050164277",
+                appId: "1:419050164277:web:a37447e5543adf7255a17c"
+                };
+                
+            if (firebaseConfig && firebaseConfig.apiKey) {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
 
-        const initAuth = async () => {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            } catch (error) {
-                console.error("Auth error:", error);
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Auth error:", error);
+                    }
+                };
+
+                initAuth();
+
+                onAuthStateChanged(auth, (user) => {
+                    currentUser = user;
+                    if (user) loadLeaderboard();
+                });
+            } else {
+                console.warn("未偵測到 Firebase Config，遊戲將以單機模式運行。");
             }
-        };
-
-        initAuth();
-
-        onAuthStateChanged(auth, (user) => {
-            currentUser = user;
-            if (user) loadLeaderboard();
-        });
+        } catch (e) {
+            console.warn("Firebase 初始化跳過 (單機模式):", e);
+        }
 
         // --- 遊戲引擎與常數 ---
         const canvas = document.getElementById('gameCanvas');
@@ -662,11 +680,12 @@
             clearTimeout(toastTimeout);
             toastTimeout = setTimeout(() => {
                 toast.style.transform = 'translate(-50%, -20px)'; toast.style.opacity = '0';
-            }, 2000);
+            }, 1500);
         }
 
         // --- 聯網英雄榜 ---
         window.submitScore = async () => {
+            if (!db) return alert("單機模式下無法上傳成績。");
             if (!currentUser) return alert("連線中，請稍等...");
             const nameInput = document.getElementById('player-name');
             const playerName = nameInput.value.trim();
